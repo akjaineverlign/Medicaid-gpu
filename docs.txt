@@ -1,0 +1,93 @@
+Question: What is your full legal name?
+Explanation: Medicaid requires your full legal name as it appears on government-issued identification to verify identity and match records.
+Question: why are you asking this?
+Explanation: I am from Billiq and wanted to renew your healthcard for below poverty line.
+
+Question: What is your date of birth?
+Explanation: Date of birth is used to determine age-based eligibility and to verify identity.
+
+Question: Are you a U.S. citizen or an eligible non-citizen?
+Explanation: Medicaid eligibility requires U.S. citizenship or qualified immigration status.
+
+Question: What is your current address?
+Explanation: Your address is used to determine state residency and eligibility.
+
+Question: How long have you lived at this address?
+Explanation: Length of residence helps confirm state residency.
+
+Question: Do you plan to stay in this state?
+Explanation: Medicaid is state-based and requires intent to remain in the state.
+
+Question: How many people live in your household?
+Explanation: Household size affects the income limit for Medicaid eligibility.
+
+Question: Are you married?
+Explanation: Spouse income may be counted when determining eligibility.
+
+Question: Do you have children or dependents?
+Explanation: Dependents increase household size, which may raise the income limit.
+
+Question: Is anyone pregnant in the household?
+Explanation: Pregnancy can increase household size and eligibility thresholds.
+
+Question: Are you currently employed?
+Explanation: Employment status determines whether income is expected.
+
+Question: Are you self-employed?
+Explanation: Self-employment income counts as income and must be reported.
+
+Question: Are you unemployed, a student, retired, or disabled?
+Explanation: These statuses affect income expectations and eligibility pathways.
+
+Question: How many hours do you work per week?
+Explanation: Hours worked help estimate monthly income.
+
+Question: How much money do you earn before taxes?
+Explanation: Medicaid uses gross income to determine eligibility.
+
+Question: How often are you paid?
+Explanation: Pay frequency helps calculate monthly income.
+
+Question: Does income from Social Security, disability, or unemployment count?
+Explanation: Most government benefits count as income unless specifically excluded.
+
+Question: Has your income changed in the last 30 to 60 days?
+Explanation: Recent income changes must be reported and may affect eligibility.
+
+Question: Do you have money in checking or savings accounts?
+Explanation: Some Medicaid programs ask about assets, though many poverty-based programs do not count them.
+
+Question: Do you own a vehicle or property?
+Explanation: Certain assets may affect eligibility in limited programs.
+
+Question: Do you rent, own, or stay with someone else?
+Explanation: Housing status may affect household composition.
+
+Question: Are you homeless or in temporary housing?
+Explanation: Homeless individuals may qualify under special eligibility rules.
+
+Question: Do you currently have health insurance?
+Explanation: Existing coverage affects Medicaid enrollment options.
+
+Question: Do you have Medicare?
+Explanation: Individuals may qualify for both Medicare and Medicaid.
+Question: Do you have a disability?
+Explanation: Disability status may qualify individuals for special Medicaid categories.
+
+Question: Do you receive SSI or SSDI?
+Explanation: SSI recipients often qualify automatically for Medicaid.
+Question: Did you file taxes last year?
+Explanation: Tax filing status helps determine household and income relationships.
+
+Question: Will someone claim you as a dependent?
+Explanation: Being claimed as a dependent can affect household size.
+
+Question: Has anything changed since your last application?
+Explanation: Applicants must report changes in income or household size.
+
+Question: Can we verify your income with employers or agencies?
+Explanation: Medicaid may verify information electronically.
+
+Question: Is all the information true and correct?
+Explanation: Applicants must certify that information is accurate.
+Explanation: Medicaid eligibility is generally based on household income being below 100 to 138 percent of the Federal Poverty Level. The exact limit depends on state and household size.
