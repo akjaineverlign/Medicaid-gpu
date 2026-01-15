@@ -1,38 +1,48 @@
-# flask    
-# twilio
-# deepgram-sdk
-# python-dotenv
-# openai
-# faiss-cpu
-# sentence-transformers
-# websockets
-# aiohttp
-# fuzzywuzzy
-# python-Levenshtein
-
-
-# Core framework
+# Core Python Framework
 numpy==1.26.4
+scipy==1.11.4
+
+# Web Frameworks
+flask==3.0.0
 quart==0.19.4
 hypercorn==0.16.0
+werkzeug==3.0.1
 
 # Twilio
 twilio==8.11.0
 
-# AI/ML
+# AI/ML Models
 openai==1.7.0
 sentence-transformers==2.3.1
-faiss-cpu==1.7.4
+transformers==4.36.0
 
-# Voice services
-deepgram-sdk==3.2.0
-elevenlabs==0.2.27
+# Vector Database
+faiss-cpu==1.7.4  # Use faiss-gpu if you have CUDA
+
+# Speech Recognition
+faster-whisper==0.10.0
+
+# Text-to-Speech
+TTS==0.22.0
+pydub==0.25.1
+
+# Audio Processing
+soundfile==0.12.1
+librosa==0.10.1
+audioop-lts==0.2.1
 
 # Utilities
 python-dotenv==1.0.0
 websockets==12.0
 fuzzywuzzy==0.18.0
 python-Levenshtein==0.23.0
-
-# HTTP client
 requests==2.31.0
+
+# Deep Learning
+torch==2.1.0  # Adjust based on your CUDA version
+torchaudio==2.1.0
+
+# Additional dependencies
+httpx==0.25.2
+anyio==4.1.0
+h11==0.14.0

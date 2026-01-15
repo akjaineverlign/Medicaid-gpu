@@ -1,9 +1,6 @@
 """
-GPU Voice Handler with Remote XTTS Server (Mac)
-- Connects to external XTTS server for voice cloning
-- Smart interruption handling
-- Waits for user to finish speaking before continuing
-- Voice Activity Detection (VAD) for natural pauses
+GPU Voice Handler with Local XTTS Integration
+Everything runs on same machine - no external dependencies
 """
 
 import asyncio
@@ -14,24 +11,20 @@ import random
 import os
 import torch
 import numpy as np
-import requests
 from faster_whisper import WhisperModel
 from medicaid_voice_agent import CallSession, is_question
-
+import soundfile as sf
+from io import BytesIO
 
 # ==================== CONFIGURATION ====================
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"🚀 Using device: {DEVICE}")
-
-# Remote XTTS Server
-XTTS_REMOTE_URL = "https://80ed611dc031.ngrok-free.app"
-print(f"🎤 XTTS Server: {XTTS_REMOTE_URL}")
+print(f"🚀 Voice Handler using device: {DEVICE}")
 
 # Voice Activity Detection Settings
-VAD_SILENCE_THRESHOLD = 1.5  # seconds of silence before considering user finished
-VAD_MIN_SPEECH_DURATION = 0.3  # minimum speech duration to count as user input
-INTERRUPTION_COOLDOWN = 0.5  # cooldown after interruption before agent continues
+VAD_SILENCE_THRESHOLD = 1.5
+VAD_MIN_SPEECH_DURATION = 0.3
+INTERRUPTION_COOLDOWN = 0.5
 
 # ==================== CONVERSATIONAL ELEMENTS ====================
 
@@ -42,8 +35,6 @@ THINKING_PHRASES = [
     "Okay, so...",
     "Alright..."
 ]
-
-BACKCHANNELS = ["mm-hmm", "I see", "okay", "right", "got it"]
 
 ACKS = [
     "Got it, thank you.",
@@ -109,15 +100,7 @@ INTERRUPTION_ACKS = [
     "Go on."
 ]
 
-SILENCE_PROMPTS = [
-    "I'm here whenever you're ready.",
-    "Take your time.",
-    "No rush.",
-    "I'm listening."
-]
-
 MAX_TTS_SECONDS = 8.0
-
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -128,14 +111,12 @@ def trim_for_tts(text, max_seconds=MAX_TTS_SECONDS):
         return " ".join(words[:max_words]) + "..."
     return text
 
-
 def detect_emotion(text: str):
     text = text.lower()
     for emotion, patterns in EMOTION_PATTERNS.items():
         if any(pattern in text for pattern in patterns):
             return emotion
     return None
-
 
 def is_interruption(text: str, context: str = ""):
     interruption_signals = [
@@ -145,6 +126,69 @@ def is_interruption(text: str, context: str = ""):
     text_lower = text.lower()
     return any(signal in text_lower for signal in interruption_signals)
 
+# ==================== LOCAL XTTS CLIENT ====================
+
+class LocalXTTSClient:
+    """
+    Local XTTS client - runs in same process
+    No network calls needed!
+    """
+    
+    def __init__(self, voice_sample_path=None):
+        print("🔧 Initializing Local XTTS Client...")
+        try:
+            from TTS.api import TTS
+            
+            self.device = DEVICE
+            print(f"📱 Loading XTTS model on {self.device}...")
+            
+            self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
+            
+            self.voice_sample_path = voice_sample_path
+            if self.voice_sample_path and os.path.exists(self.voice_sample_path):
+                print(f"🎤 Voice sample loaded: {self.voice_sample_path}")
+            else:
+                print("⚠️ No voice sample - using default voice")
+            
+            print("✅ Local XTTS ready")
+            
+        except Exception as e:
+            print(f"❌ Error loading XTTS: {e}")
+            self.tts = None
+    
+    def generate_speech(self, text, language="en"):
+        """
+        Generate speech locally
+        Returns: Audio as numpy array
+        """
+        if self.tts is None:
+            print("❌ XTTS not available")
+            return None
+        
+        try:
+            print(f"🎤 Generating speech: '{text[:50]}...'")
+            start_time = time.time()
+            
+            if self.voice_sample_path and os.path.exists(self.voice_sample_path):
+                wav = self.tts.tts(
+                    text=text,
+                    speaker_wav=self.voice_sample_path,
+                    language=language
+                )
+            else:
+                wav = self.tts.tts(
+                    text=text,
+                    language=language
+                )
+            
+            elapsed = time.time() - start_time
+            print(f"✅ Speech generated in {elapsed:.2f}s")
+            
+            return np.array(wav, dtype=np.float32)
+        
+        except Exception as e:
+            print(f"❌ TTS error: {e}")
+            return None
 
 # ==================== CONVERSATION CONTEXT MANAGER ====================
 
@@ -174,9 +218,6 @@ class ConversationContext:
     def get_recent_context(self, n=5):
         return self.history[-n*2:] if self.history else []
     
-    def get_full_context(self):
-        return self.history
-    
     def format_for_llm(self):
         formatted = []
         for msg in self.history:
@@ -188,125 +229,46 @@ class ConversationContext:
         if not self.history:
             return "No conversation yet."
         
-        user_messages = [m["content"] for m in self.history if m["role"] == "user"]
-        agent_messages = [m["content"] for m in self.history if m["role"] == "agent"]
-        
         return {
             "total_exchanges": len(self.history) // 2,
             "duration": time.time() - self.start_time,
-            "user_messages": len(user_messages),
-            "agent_messages": len(agent_messages)
+            "message_count": len(self.history)
         }
-
-
-# ==================== REMOTE XTTS CLIENT ====================
-
-class RemoteXTTSClient:
-    """Client for remote XTTS server running on Mac"""
-    
-    def __init__(self, base_url, voice_sample_path=None):
-        self.base_url = base_url.rstrip('/')
-        self.voice_sample_path = voice_sample_path
-        
-        # Test connection
-        try:
-            response = requests.get(f"{self.base_url}/health", timeout=5)
-            if response.status_code == 200:
-                print(f"✅ Connected to XTTS server: {self.base_url}")
-            else:
-                print(f"⚠️ XTTS server responded with status {response.status_code}")
-        except Exception as e:
-            print(f"⚠️ Could not connect to XTTS server: {e}")
-            print("   Make sure your Mac XTTS server is running!")
-    
-    def tts(self, text, language="en"):
-        """
-        Generate speech using remote XTTS server
-        
-        Args:
-            text: Text to synthesize
-            language: Language code
-            
-        Returns:
-            Audio data as bytes
-        """
-        try:
-            # Prepare request
-            data = {
-                "text": text,
-                "language": language
-            }
-            
-            # If voice sample is provided, send it
-            files = None
-            if self.voice_sample_path and os.path.exists(self.voice_sample_path):
-                with open(self.voice_sample_path, 'rb') as f:
-                    files = {'speaker_wav': f}
-                    response = requests.post(
-                        f"{self.base_url}/tts",
-                        data=data,
-                        files=files,
-                        timeout=30
-                    )
-            else:
-                # No voice sample, use default voice
-                response = requests.post(
-                    f"{self.base_url}/tts",
-                    json=data,
-                    timeout=30
-                )
-            
-            if response.status_code == 200:
-                return response.content
-            else:
-                print(f"⚠️ TTS request failed with status {response.status_code}")
-                return None
-                
-        except Exception as e:
-            print(f"❌ TTS error: {e}")
-            return None
-
 
 # ==================== GPU VOICE HANDLER ====================
 
 class GPUVoiceHandler:
     """
-    Enhanced voice handler with:
-    - Remote XTTS for voice cloning (Mac server)
-    - Smart interruption handling
-    - VAD for detecting when user finishes speaking
-    - Natural conversation flow
+    Enhanced voice handler with local XTTS
+    All processing on same machine
     """
 
     def __init__(self, voice_sample_path=None):
         print("🔧 Initializing GPU Voice Handler...")
         
         # Initialize Faster Whisper (GPU-accelerated STT)
-        print("📥 Loading Faster Whisper model...")
+        print("🔥 Loading Faster Whisper model...")
         self.whisper = WhisperModel(
             "large-v3",
             device=DEVICE,
             compute_type="float16" if DEVICE == "cuda" else "int8",
-            vad_filter=True  # Enable Voice Activity Detection
+            vad_filter=True
         )
         print("✅ Whisper loaded with VAD")
         
-        # Initialize Remote XTTS Client
-        print("🎤 Connecting to remote XTTS server...")
-        self.tts = RemoteXTTSClient(
-            base_url=XTTS_REMOTE_URL,
-            voice_sample_path=voice_sample_path
-        )
-        print("✅ XTTS client initialized")
+        # Initialize Local XTTS
+        print("🎤 Initializing local XTTS...")
+        self.tts = LocalXTTSClient(voice_sample_path=voice_sample_path)
+        print("✅ XTTS initialized")
         
         # Active connections
         self.active_connections = {}
         self.conversation_contexts = {}
         
-        # Audio buffers for streaming
+        # Audio buffers
         self.audio_buffers = {}
         
-        # Voice Activity Detection state
+        # VAD state
         self.vad_state = {}
 
     async def handle_call(self, websocket, call_sid, session: CallSession):
@@ -327,14 +289,8 @@ class GPUVoiceHandler:
             "last_speech_time": 0,
             "last_silence_time": 0,
             "speech_start_time": 0,
-            "user_finished_speaking": False,
-            "agent_can_speak": True
+            "user_finished_speaking": False
         }
-        
-        # Conversation state tracking
-        agent_speaking = False
-        agent_was_interrupted = False
-        pending_agent_message = None
         
         # Store connection info
         self.active_connections[call_sid] = {
@@ -359,31 +315,28 @@ class GPUVoiceHandler:
                     audio_payload = base64.b64decode(data["media"]["payload"])
                     self.audio_buffers[call_sid].extend(audio_payload)
                     
-                    # Update VAD state - user is providing audio
+                    # Update VAD state
                     vad = self.vad_state[call_sid]
                     current_time = time.time()
                     
-                    # Check if user is speaking (simple energy-based detection)
+                    # Simple energy-based detection
                     audio_energy = np.frombuffer(audio_payload, dtype=np.uint8).std()
                     
-                    if audio_energy > 10:  # Threshold for speech detection
+                    if audio_energy > 10:
                         if not vad["is_speaking"]:
                             vad["speech_start_time"] = current_time
                             vad["is_speaking"] = True
                             print(f"🎤 [{call_sid}] User started speaking")
                             
-                            # ========== INTERRUPTION DETECTION ==========
+                            # Check for interruption
                             conn = self.active_connections.get(call_sid)
                             if conn and conn.get("agent_speaking"):
                                 print(f"✋ [{call_sid}] User interrupted agent!")
                                 conn["agent_speaking"] = False
-                                agent_was_interrupted = True
                                 
-                                # Acknowledge interruption
                                 await self.speak(
                                     call_sid,
                                     random.choice(INTERRUPTION_ACKS),
-                                    priority=True,
                                     low_volume=True
                                 )
                                 await asyncio.sleep(INTERRUPTION_COOLDOWN)
@@ -391,10 +344,9 @@ class GPUVoiceHandler:
                         vad["last_speech_time"] = current_time
                         vad["user_finished_speaking"] = False
                     else:
-                        # Silence detected
                         vad["last_silence_time"] = current_time
                     
-                    # Check if user finished speaking
+                    # Check if user finished
                     if vad["is_speaking"]:
                         silence_duration = current_time - vad["last_speech_time"]
                         speech_duration = current_time - vad["speech_start_time"]
@@ -403,11 +355,10 @@ class GPUVoiceHandler:
                             speech_duration >= VAD_MIN_SPEECH_DURATION):
                             vad["is_speaking"] = False
                             vad["user_finished_speaking"] = True
-                            print(f"✅ [{call_sid}] User finished speaking (silence: {silence_duration:.1f}s)")
+                            print(f"✅ [{call_sid}] User finished speaking")
                     
-                    # Process audio chunk when buffer is large enough
-                    if len(self.audio_buffers[call_sid]) > 16000 * 2:  # ~2 seconds
-                        # Only process if user finished speaking
+                    # Process audio when buffer is large enough
+                    if len(self.audio_buffers[call_sid]) > 16000 * 2:
                         if vad["user_finished_speaking"]:
                             await self.process_audio_chunk(call_sid)
                             vad["user_finished_speaking"] = False
@@ -421,53 +372,42 @@ class GPUVoiceHandler:
             self.active_connections.pop(call_sid, None)
             self.audio_buffers.pop(call_sid, None)
             self.vad_state.pop(call_sid, None)
-            
-            # Save conversation context
             self.save_conversation_context(call_sid)
-            
             print(f"🧹 Cleaned up connection: {call_sid}")
 
-
     async def process_audio_chunk(self, call_sid):
-        """Process accumulated audio using Faster Whisper (GPU)"""
+        """Process audio using Faster Whisper"""
         
         audio_data = bytes(self.audio_buffers[call_sid])
         self.audio_buffers[call_sid] = bytearray()
         
-        if len(audio_data) < 1600:  # Too short
+        if len(audio_data) < 1600:
             return
         
         try:
-            # Convert mu-law to float32 for Whisper
+            # Convert to float32
             audio_np = np.frombuffer(audio_data, dtype=np.uint8).astype(np.float32)
-            audio_np = (audio_np - 128.0) / 128.0  # Normalize
+            audio_np = (audio_np - 128.0) / 128.0
             
-            # Run Whisper inference with VAD
+            # Transcribe
             segments, info = self.whisper.transcribe(
                 audio_np,
                 beam_size=5,
                 language="en",
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.5,
-                    "min_speech_duration_ms": 250,
-                    "min_silence_duration_ms": 500
-                }
+                vad_filter=True
             )
             
-            # Get transcript
             transcript = " ".join([segment.text for segment in segments]).strip()
             
             if transcript:
-                print(f"👤 [{call_sid}] User: {transcript}")
+                print(f"💤 [{call_sid}] User: {transcript}")
                 await self.process_user_input(call_sid, transcript)
         
         except Exception as e:
             print(f"❌ Error processing audio: {e}")
 
-
     async def process_user_input(self, call_sid, transcript):
-        """Process user's speech with full conversation context"""
+        """Process user's speech"""
         
         conn = self.active_connections.get(call_sid)
         if not conn:
@@ -476,12 +416,10 @@ class GPUVoiceHandler:
         session = conn["session"]
         context = conn["context"]
         
-        # Add to conversation history
         context.add_user_message(transcript)
-        
-        print(f"👤 [{call_sid}] User: {transcript}")
+        print(f"💤 [{call_sid}] User: {transcript}")
 
-        # ========== EMOTION DETECTION & EMPATHY ==========
+        # Emotion detection
         emotion = detect_emotion(transcript)
         if emotion and emotion in EMOTION_RESPONSES:
             empathy_response = random.choice(EMOTION_RESPONSES[emotion])
@@ -489,90 +427,73 @@ class GPUVoiceHandler:
             await self.speak(call_sid, empathy_response, low_volume=True)
             await asyncio.sleep(0.4)
 
-        # ========== CHECK IF IT'S A QUESTION (RAG NEEDED) ==========
+        # Check for question
         if is_question(transcript):
-            print(f"❓ [{call_sid}] Question detected, using GPU RAG with full context...")
+            print(f"❓ [{call_sid}] Question detected, using GPU RAG...")
             
-            # Natural transition to RAG answer
             transition = random.choice(RAG_TRANSITIONS)
             context.add_agent_message(transition)
             await self.speak(call_sid, transition, low_volume=True)
             await asyncio.sleep(0.3)
             
-            # Get RAG answer using session's method
             rag_answer = session.answer_user_question(transcript)
             
-            # Deliver answer
             context.add_agent_message(rag_answer)
             await self.speak(call_sid, rag_answer)
             await asyncio.sleep(0.5)
             
-            # Ask follow-up question after RAG
             follow_up = random.choice(RAG_FOLLOW_UPS)
             context.add_agent_message(follow_up)
             await self.speak(call_sid, follow_up)
             
             return
 
-        # ========== NORMAL CONVERSATION FLOW ==========
+        # Normal flow
         if random.random() < 0.3:
             thinking = random.choice(THINKING_PHRASES)
             context.add_agent_message(thinking)
             await self.speak(call_sid, thinking, low_volume=True)
             await asyncio.sleep(0.2)
 
-        # Process response through session logic
         agent_response, should_advance = session.handle_response(transcript)
         
         print(f"🤖 [{call_sid}] Agent: {agent_response}")
-        
-        # Add to context
         context.add_agent_message(agent_response)
 
-        # Deliver agent's response
         await self.speak(call_sid, agent_response)
 
-        # ========== HANDLE STEP ADVANCEMENT ==========
         if should_advance:
             await asyncio.sleep(0.4)
             
-            # Acknowledge before moving on
             ack = random.choice(ACKS)
             context.add_agent_message(ack)
             await self.speak(call_sid, ack, low_volume=True)
             await asyncio.sleep(0.3)
             
-            # Natural transition
             transition = random.choice(TRANSITIONS)
             context.add_agent_message(transition)
             await self.speak(call_sid, transition, low_volume=True)
             await asyncio.sleep(0.4)
 
-            # Advance to next step
             session.advance_step()
             current_step = session.get_current_step()
 
             if current_step is None:
                 await self.end_call(call_sid)
-                
             elif current_step == "close":
                 final_message = session.ask_question()
                 context.add_agent_message(final_message)
                 await self.speak(call_sid, final_message)
                 session.form["status"] = "REDETERMINATION_COMPLETE"
                 await self.end_call(call_sid)
-                
             else:
                 if session.needs_question():
                     next_question = session.ask_question()
                     context.add_agent_message(next_question)
                     await self.speak(call_sid, next_question)
 
-
-    async def speak(self, call_sid, text, low_volume=False, priority=False):
-        """
-        Convert text to speech using Remote XTTS server
-        """
+    async def speak(self, call_sid, text, low_volume=False):
+        """Generate and stream speech using local XTTS"""
         
         text = trim_for_tts(text)
         
@@ -581,30 +502,26 @@ class GPUVoiceHandler:
             return
 
         try:
-            # Mark agent as speaking (unless it's a low volume backchannel)
             if not low_volume:
                 conn["agent_speaking"] = True
 
-            # Generate speech using remote XTTS server
-            print(f"🎤 Generating speech via remote XTTS: '{text[:50]}...'")
-            start_time = time.time()
+            # Generate speech locally
+            audio_data = self.tts.generate_speech(text=text, language="en")
             
-            audio_bytes = self.tts.tts(text=text, language="en")
-            
-            if audio_bytes is None:
+            if audio_data is None:
                 print(f"❌ Failed to generate speech")
                 conn["agent_speaking"] = False
                 return
-            
-            elapsed = time.time() - start_time
-            print(f"✅ Speech generated in {elapsed:.2f}s ({len(audio_bytes)} bytes)")
 
-            # Convert audio to format suitable for Twilio (mu-law, 8kHz)
-            # For now, we'll send the audio as-is and handle conversion on XTTS server
-            
-            # Send to Twilio via WebSocket
-            if conn["websocket"]:
-                audio_base64 = base64.b64encode(audio_bytes).decode()
+            # Convert to mu-law 8kHz for Twilio
+            audio_8k = self.resample_to_8khz(audio_data)
+            mulaw = self.convert_to_mulaw(audio_8k)
+
+            # Send in chunks
+            CHUNK_SIZE = 160  # 20ms at 8kHz
+            for i in range(0, len(mulaw), CHUNK_SIZE):
+                chunk = mulaw[i:i + CHUNK_SIZE]
+                audio_base64 = base64.b64encode(chunk).decode()
                 
                 message = {
                     "event": "media",
@@ -615,13 +532,8 @@ class GPUVoiceHandler:
                 }
                 
                 await conn["websocket"].send(json.dumps(message))
+                await asyncio.sleep(0.02)  # 20ms delay
 
-            # Estimate speech duration and wait
-            # Assuming 22050 Hz sample rate, 16-bit audio
-            duration = len(audio_bytes) / (22050 * 2)
-            await asyncio.sleep(duration)
-
-            # Mark agent as done speaking
             if not low_volume:
                 conn["agent_speaking"] = False
 
@@ -629,9 +541,31 @@ class GPUVoiceHandler:
             print(f"❌ TTS error: {e}")
             conn["agent_speaking"] = False
 
+    def resample_to_8khz(self, audio, orig_sr=22050):
+        """Resample audio to 8kHz"""
+        import scipy.signal as signal
+        
+        target_sr = 8000
+        num_samples = int(len(audio) * target_sr / orig_sr)
+        resampled = signal.resample(audio, num_samples)
+        return resampled.astype(np.float32)
+
+    def convert_to_mulaw(self, audio):
+        """Convert float32 audio to mu-law"""
+        # Normalize
+        audio = np.clip(audio, -1.0, 1.0)
+        
+        # Convert to 16-bit PCM
+        pcm = (audio * 32767).astype(np.int16)
+        
+        # Convert to mu-law
+        import audioop
+        mulaw = audioop.lin2ulaw(pcm.tobytes(), 2)
+        
+        return mulaw
 
     def save_conversation_context(self, call_sid):
-        """Save full conversation context to file"""
+        """Save conversation to file"""
         
         context = self.conversation_contexts.get(call_sid)
         if not context:
@@ -645,18 +579,17 @@ class GPUVoiceHandler:
             "start_time": context.start_time,
             "end_time": time.time(),
             "duration": time.time() - context.start_time,
-            "full_history": context.get_full_context(),
+            "full_history": context.history,
             "summary": context.get_conversation_summary()
         }
         
         with open(f"call_logs/{call_sid}_context.json", "w") as f:
             json.dump(context_data, f, indent=2)
         
-        print(f"💾 Conversation context saved: call_logs/{call_sid}_context.json")
-
+        print(f"💾 Conversation context saved")
 
     async def end_call(self, call_sid):
-        """End call gracefully and save all data"""
+        """End call gracefully"""
         
         conn = self.active_connections.get(call_sid)
         if not conn:
@@ -664,7 +597,6 @@ class GPUVoiceHandler:
 
         session = conn["session"]
 
-        # Save call log
         os.makedirs("call_logs", exist_ok=True)
         log_path = f"call_logs/{call_sid}.json"
         
@@ -672,23 +604,19 @@ class GPUVoiceHandler:
             json.dump(session.form, f, indent=2)
 
         print(f"💾 Call log saved: {log_path}")
-        
-        # Save conversation context
         self.save_conversation_context(call_sid)
 
-        # Close WebSocket
         if conn["websocket"]:
             await conn["websocket"].close()
 
-        print(f"✅ Call ended successfully: {call_sid}")
+        print(f"✅ Call ended: {call_sid}")
 
-
-# ==================== SINGLETON INSTANCE ====================
+# ==================== SINGLETON ====================
 
 _voice_handler = None
 
 def get_voice_handler():
-    """Get or create the global voice handler instance"""
+    """Get or create voice handler"""
     global _voice_handler
     if _voice_handler is None:
         voice_sample = os.getenv("VOICE_SAMPLE_PATH")
