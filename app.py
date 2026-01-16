@@ -1,11 +1,11 @@
 """
 Integrated Medicaid Voice Agent Server
-Runs Flask + WebSocket + XTTS on same machine
-All components communicate directly without ngrok
+Connects to external XTTS server via HTTP
+All components communicate through network requests
 """
 
 from flask import Flask, request, Response, jsonify
-from twilio.twiml.voice_response import VoiceResponse, Gather, Connect
+from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
 import os
 from dotenv import load_dotenv
@@ -25,6 +25,9 @@ TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 PUBLIC_URL = os.getenv('PUBLIC_URL')  # Your ngrok URL for webhooks
+
+# XTTS Server Configuration
+XTTS_SERVER_URL = os.getenv('XTTS_SERVER_URL', 'http://localhost:8000')
 
 HTTP_PORT = 5000  # Flask HTTP server
 WS_PORT = 5001    # WebSocket server
@@ -141,12 +144,27 @@ def save_session(call_sid, session):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
+    # Check XTTS server connectivity
+    import requests
+    try:
+        xtts_response = requests.get(f'{XTTS_SERVER_URL}/health', timeout=2)
+        xtts_healthy = xtts_response.status_code == 200
+        xtts_info = xtts_response.json() if xtts_healthy else {}
+    except:
+        xtts_healthy = False
+        xtts_info = {}
+    
     return {
         'status': 'healthy',
         'active_calls': len(active_sessions),
         'sessions': list(active_sessions.keys()),
         'http_port': HTTP_PORT,
         'ws_port': WS_PORT,
+        'xtts_server': {
+            'url': XTTS_SERVER_URL,
+            'healthy': xtts_healthy,
+            'info': xtts_info
+        },
         'config': {
             'twilio_number': TWILIO_PHONE_NUMBER,
             'public_url': PUBLIC_URL
@@ -165,7 +183,8 @@ def index():
             'make_call': f'{PUBLIC_URL}/make-call',
             'health': f'{PUBLIC_URL}/health',
             'websocket': f'wss://{PUBLIC_URL.replace("https://", "")}:{WS_PORT}/stream'
-        }
+        },
+        'xtts_server': XTTS_SERVER_URL
     }
 
 
@@ -182,7 +201,7 @@ def get_voice_handler():
     if voice_handler is None:
         from gpu_voice_handler import GPUVoiceHandler
         print("🔧 Initializing GPU Voice Handler...")
-        voice_handler = GPUVoiceHandler()
+        voice_handler = GPUVoiceHandler(xtts_server_url=XTTS_SERVER_URL)
         print("✅ Voice Handler ready")
     return voice_handler
 
@@ -248,72 +267,6 @@ async def ws_health():
     }
 
 
-# ==================== INTEGRATED XTTS (Local) ====================
-
-class LocalXTTS:
-    """
-    Local XTTS running in same process
-    No need for separate server or ngrok
-    """
-    
-    def __init__(self):
-        print("🔧 Loading local XTTS...")
-        try:
-            from TTS.api import TTS
-            import torch
-            
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            print(f"📱 Using device: {self.device}")
-            
-            self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
-            
-            # Load voice sample if available
-            self.voice_sample = os.getenv('VOICE_SAMPLE_PATH')
-            if self.voice_sample and os.path.exists(self.voice_sample):
-                print(f"🎤 Voice sample loaded: {self.voice_sample}")
-            else:
-                print("⚠️ No voice sample found, using default voice")
-            
-            print("✅ XTTS loaded successfully")
-        
-        except Exception as e:
-            print(f"❌ Error loading XTTS: {e}")
-            print("   Falling back to Polly (AWS)")
-            self.tts = None
-    
-    def generate_speech(self, text, language="en"):
-        """Generate speech audio"""
-        if self.tts is None:
-            return None
-        
-        try:
-            if self.voice_sample and os.path.exists(self.voice_sample):
-                wav = self.tts.tts(
-                    text=text,
-                    speaker_wav=self.voice_sample,
-                    language=language
-                )
-            else:
-                wav = self.tts.tts(text=text, language=language)
-            
-            return wav
-        
-        except Exception as e:
-            print(f"❌ TTS error: {e}")
-            return None
-
-
-# Initialize local XTTS
-local_xtts = None
-
-def get_local_xtts():
-    """Lazy initialization of XTTS"""
-    global local_xtts
-    if local_xtts is None:
-        local_xtts = LocalXTTS()
-    return local_xtts
-
-
 # ==================== SERVER STARTUP ====================
 
 def run_flask():
@@ -340,6 +293,7 @@ def main():
     print(f"🌐 Public URL: {PUBLIC_URL}")
     print(f"🖥️  HTTP Server: http://localhost:{HTTP_PORT}")
     print(f"🔌 WebSocket Server: ws://localhost:{WS_PORT}")
+    print(f"🎤 XTTS Server: {XTTS_SERVER_URL}")
     print("="*60)
     
     # Pre-initialize components
@@ -351,10 +305,20 @@ def main():
     rag = GPURAGSystem()
     print("✅ GPU RAG ready")
     
-    # Initialize XTTS
-    print("🎤 Loading XTTS...")
-    xtts = get_local_xtts()
-    print("✅ XTTS ready")
+    # Check XTTS connectivity
+    print(f"🎤 Checking XTTS server at {XTTS_SERVER_URL}...")
+    import requests
+    try:
+        response = requests.get(f'{XTTS_SERVER_URL}/health', timeout=5)
+        if response.status_code == 200:
+            print("✅ XTTS server connected")
+            print(f"   {response.json()}")
+        else:
+            print("⚠️  XTTS server not responding properly")
+    except Exception as e:
+        print(f"❌ Cannot connect to XTTS server: {e}")
+        print(f"   Make sure XTTS server is running at {XTTS_SERVER_URL}")
+        print(f"   Start it with: python xtts_server.py")
     
     print("\n✅ All components initialized")
     print("\n" + "="*60)

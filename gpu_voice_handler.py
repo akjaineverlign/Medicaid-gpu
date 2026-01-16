@@ -1,6 +1,6 @@
 """
-GPU Voice Handler with Local XTTS Integration
-Everything runs on same machine - no external dependencies
+GPU Voice Handler with External XTTS Server Integration
+Connects to your standalone XTTS server via HTTP
 """
 
 import asyncio
@@ -13,8 +13,9 @@ import torch
 import numpy as np
 from faster_whisper import WhisperModel
 from medicaid_voice_agent import CallSession, is_question
-import soundfile as sf
+import requests
 from io import BytesIO
+import soundfile as sf
 
 # ==================== CONFIGURATION ====================
 
@@ -126,69 +127,101 @@ def is_interruption(text: str, context: str = ""):
     text_lower = text.lower()
     return any(signal in text_lower for signal in interruption_signals)
 
-# ==================== LOCAL XTTS CLIENT ====================
+# ==================== EXTERNAL XTTS CLIENT ====================
 
-class LocalXTTSClient:
+class ExternalXTTSClient:
     """
-    Local XTTS client - runs in same process
-    No network calls needed!
+    Client for external XTTS server
+    Communicates via HTTP requests
     """
     
-    def __init__(self, voice_sample_path=None):
-        print("🔧 Initializing Local XTTS Client...")
+    def __init__(self, server_url):
+        self.server_url = server_url.rstrip('/')
+        print(f"🔧 Initializing External XTTS Client...")
+        print(f"   Server URL: {self.server_url}")
+        
+        # Test connectivity
         try:
-            from TTS.api import TTS
-            
-            self.device = DEVICE
-            print(f"📱 Loading XTTS model on {self.device}...")
-            
-            self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
-            
-            self.voice_sample_path = voice_sample_path
-            if self.voice_sample_path and os.path.exists(self.voice_sample_path):
-                print(f"🎤 Voice sample loaded: {self.voice_sample_path}")
+            response = requests.get(f"{self.server_url}/health", timeout=5)
+            if response.status_code == 200:
+                health_data = response.json()
+                print(f"✅ Connected to XTTS server")
+                print(f"   Device: {health_data.get('device')}")
+                print(f"   Model: {health_data.get('model')}")
+                print(f"   Default Voice: {health_data.get('default_voice', 'None')}")
+                self.available = True
             else:
-                print("⚠️ No voice sample - using default voice")
-            
-            print("✅ Local XTTS ready")
-            
+                print(f"⚠️  XTTS server returned status {response.status_code}")
+                self.available = False
         except Exception as e:
-            print(f"❌ Error loading XTTS: {e}")
-            self.tts = None
+            print(f"❌ Cannot connect to XTTS server: {e}")
+            print(f"   Make sure server is running at {self.server_url}")
+            self.available = False
     
-    def generate_speech(self, text, language="en"):
+    def generate_speech(self, text, language="en", output_format="mulaw"):
         """
-        Generate speech locally
-        Returns: Audio as numpy array
+        Generate speech via HTTP request
+        
+        Args:
+            text: Text to synthesize
+            language: Language code (default: "en")
+            output_format: "wav" or "mulaw" (default: "mulaw" for Twilio)
+        
+        Returns:
+            Audio data as bytes (mu-law for Twilio, or WAV)
         """
-        if self.tts is None:
-            print("❌ XTTS not available")
+        if not self.available:
+            print("❌ XTTS server not available")
             return None
         
         try:
-            print(f"🎤 Generating speech: '{text[:50]}...'")
+            print(f"🎤 Generating speech via XTTS server: '{text[:50]}...'")
             start_time = time.time()
             
-            if self.voice_sample_path and os.path.exists(self.voice_sample_path):
-                wav = self.tts.tts(
-                    text=text,
-                    speaker_wav=self.voice_sample_path,
-                    language=language
-                )
-            else:
-                wav = self.tts.tts(
-                    text=text,
-                    language=language
-                )
+            # Make request to XTTS server
+            response = requests.post(
+                f"{self.server_url}/tts",
+                json={
+                    "text": text,
+                    "language": language
+                },
+                params={
+                    "format": output_format  # "mulaw" or "wav"
+                },
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                print(f"❌ XTTS server error: {response.status_code}")
+                return None
             
             elapsed = time.time() - start_time
             print(f"✅ Speech generated in {elapsed:.2f}s")
             
-            return np.array(wav, dtype=np.float32)
+            return response.content
         
-        except Exception as e:
-            print(f"❌ TTS error: {e}")
+        except requests.exceptions.Timeout:
+            print("❌ XTTS request timed out")
             return None
+        except Exception as e:
+            print(f"❌ XTTS error: {e}")
+            return None
+    
+    def test_generation(self):
+        """Test speech generation"""
+        try:
+            print("🧪 Testing XTTS generation...")
+            response = requests.get(f"{self.server_url}/test", timeout=30)
+            
+            if response.status_code == 200:
+                print("✅ Test generation successful")
+                return True
+            else:
+                print(f"❌ Test failed with status {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Test error: {e}")
+            return False
 
 # ==================== CONVERSATION CONTEXT MANAGER ====================
 
@@ -239,15 +272,15 @@ class ConversationContext:
 
 class GPUVoiceHandler:
     """
-    Enhanced voice handler with local XTTS
-    All processing on same machine
+    Enhanced voice handler with external XTTS server
+    All TTS processing delegated to standalone server
     """
 
-    def __init__(self, voice_sample_path=None):
+    def __init__(self, xtts_server_url):
         print("🔧 Initializing GPU Voice Handler...")
         
         # Initialize Faster Whisper (GPU-accelerated STT)
-        print("🔥 Loading Faster Whisper model...")
+        print("📥 Loading Faster Whisper model...")
         self.whisper = WhisperModel(
             "large-v3",
             device=DEVICE,
@@ -256,10 +289,10 @@ class GPUVoiceHandler:
         )
         print("✅ Whisper loaded with VAD")
         
-        # Initialize Local XTTS
-        print("🎤 Initializing local XTTS...")
-        self.tts = LocalXTTSClient(voice_sample_path=voice_sample_path)
-        print("✅ XTTS initialized")
+        # Initialize External XTTS Client
+        print("🎤 Connecting to external XTTS server...")
+        self.tts = ExternalXTTSClient(server_url=xtts_server_url)
+        print("✅ XTTS client initialized")
         
         # Active connections
         self.active_connections = {}
@@ -400,7 +433,7 @@ class GPUVoiceHandler:
             transcript = " ".join([segment.text for segment in segments]).strip()
             
             if transcript:
-                print(f"💤 [{call_sid}] User: {transcript}")
+                print(f"👤 [{call_sid}] User: {transcript}")
                 await self.process_user_input(call_sid, transcript)
         
         except Exception as e:
@@ -417,7 +450,7 @@ class GPUVoiceHandler:
         context = conn["context"]
         
         context.add_user_message(transcript)
-        print(f"💤 [{call_sid}] User: {transcript}")
+        print(f"👤 [{call_sid}] User: {transcript}")
 
         # Emotion detection
         emotion = detect_emotion(transcript)
@@ -493,7 +526,7 @@ class GPUVoiceHandler:
                     await self.speak(call_sid, next_question)
 
     async def speak(self, call_sid, text, low_volume=False):
-        """Generate and stream speech using local XTTS"""
+        """Generate and stream speech using external XTTS server"""
         
         text = trim_for_tts(text)
         
@@ -505,17 +538,21 @@ class GPUVoiceHandler:
             if not low_volume:
                 conn["agent_speaking"] = True
 
-            # Generate speech locally
-            audio_data = self.tts.generate_speech(text=text, language="en")
+            # Generate speech via external XTTS server
+            # Request mu-law format directly (optimized for Twilio)
+            audio_data = self.tts.generate_speech(
+                text=text,
+                language="en",
+                output_format="mulaw"  # Get mu-law directly from server
+            )
             
             if audio_data is None:
                 print(f"❌ Failed to generate speech")
                 conn["agent_speaking"] = False
                 return
 
-            # Convert to mu-law 8kHz for Twilio
-            audio_8k = self.resample_to_8khz(audio_data)
-            mulaw = self.convert_to_mulaw(audio_8k)
+            # Audio is already in mu-law 8kHz format from server
+            mulaw = audio_data
 
             # Send in chunks
             CHUNK_SIZE = 160  # 20ms at 8kHz
@@ -540,29 +577,6 @@ class GPUVoiceHandler:
         except Exception as e:
             print(f"❌ TTS error: {e}")
             conn["agent_speaking"] = False
-
-    def resample_to_8khz(self, audio, orig_sr=22050):
-        """Resample audio to 8kHz"""
-        import scipy.signal as signal
-        
-        target_sr = 8000
-        num_samples = int(len(audio) * target_sr / orig_sr)
-        resampled = signal.resample(audio, num_samples)
-        return resampled.astype(np.float32)
-
-    def convert_to_mulaw(self, audio):
-        """Convert float32 audio to mu-law"""
-        # Normalize
-        audio = np.clip(audio, -1.0, 1.0)
-        
-        # Convert to 16-bit PCM
-        pcm = (audio * 32767).astype(np.int16)
-        
-        # Convert to mu-law
-        import audioop
-        mulaw = audioop.lin2ulaw(pcm.tobytes(), 2)
-        
-        return mulaw
 
     def save_conversation_context(self, call_sid):
         """Save conversation to file"""
@@ -615,255 +629,11 @@ class GPUVoiceHandler:
 
 _voice_handler = None
 
-def get_voice_handler():
+def get_voice_handler(xtts_server_url=None):
     """Get or create voice handler"""
     global _voice_handler
     if _voice_handler is None:
-        voice_sample = os.getenv("VOICE_SAMPLE_PATH")
-        _voice_handler = GPUVoiceHandler(voice_sample_path=voice_sample)
+        if xtts_server_url is None:
+            xtts_server_url = os.getenv('XTTS_SERVER_URL', 'http://localhost:8000')
+        _voice_handler = GPUVoiceHandler(xtts_server_url=xtts_server_url)
     return _voice_handler
-
-# import asyncio
-# import json
-# import base64
-# import time
-# import random
-# import os
-# import torch
-# import numpy as np
-# from faster_whisper import WhisperModel
-# from medicaid_voice_agent import CallSession, is_question
-# import requests
-# import soundfile as sf
-# from io import BytesIO
-# import uuid
-
-# # ==================== XTTS CONFIG ====================
-
-# XTTS_REMOTE_URL = "https://80d055e25e88.ngrok-free.app/"
-
-# def synthesize_xtts_remote(text: str) -> np.ndarray:
-#     resp = requests.post(
-#         XTTS_REMOTE_URL,
-#         json={"text": text, "language": "en"},
-#         timeout=60
-#     )
-#     resp.raise_for_status()
-#     wav, _ = sf.read(BytesIO(resp.content), dtype="float32")
-#     return wav
-
-
-
-# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# print(f"🚀 Using device: {DEVICE}")
-
-
-
-# THINKING_PHRASES = [
-#     "Let me see...", "One moment...", "Hmm, let me check that...",
-#     "Okay, so...", "Alright..."
-# ]
-
-# BACKCHANNELS = ["mm-hmm", "I see", "okay", "right", "got it"]
-
-# ACKS = [
-#     "Got it, thank you.", "Perfect, thanks for that.",
-#     "Okay, I have that down.", "Great, noted.", "Thank you for sharing that."
-# ]
-
-# TRANSITIONS = [
-#     "Alright, moving on...", "Okay, next thing...",
-#     "Great, now let's talk about...", "Perfect. So...",
-#     "Wonderful. Now..."
-# ]
-
-# INTERRUPTION_ACKS = [
-#     "Oh, sorry, go ahead.", "Yes, what was that?",
-#     "I'm listening.", "Go on."
-# ]
-
-# SILENCE_PROMPTS = [
-#     "I'm here whenever you're ready.",
-#     "Take your time.",
-#     "No rush.",
-#     "I'm listening."
-# ]
-
-# MAX_TTS_SECONDS = 8.0
-
-
-# # ==================== HELPERS ====================
-
-# def trim_for_tts(text, max_seconds=MAX_TTS_SECONDS):
-#     words = text.split()
-#     max_words = int(max_seconds * 2.5)
-#     return " ".join(words[:max_words]) + ("..." if len(words) > max_words else "")
-
-# def is_interruption(text: str):
-#     signals = [
-#         "wait", "hold on", "excuse me", "sorry",
-#         "actually", "but", "what about", "one thing"
-#     ]
-#     return any(s in text.lower() for s in signals)
-
-
-# # ==================== VOICE HANDLER ====================
-
-# class GPUVoiceHandler:
-
-#     def __init__(self):
-#         print("🔧 Initializing GPU Voice Handler...")
-
-#         self.whisper = WhisperModel(
-#             "large-v3",
-#             device=DEVICE,
-#             compute_type="float16" if DEVICE == "cuda" else "int8"
-#         )
-
-#         self.active_connections = {}
-#         self.audio_buffers = {}
-#         self.playback_tokens = {}
-
-#     # ==================== MAIN CALL ====================
-
-#     async def handle_call(self, websocket, call_sid, session: CallSession):
-
-#         self.audio_buffers[call_sid] = bytearray()
-
-#         self.active_connections[call_sid] = {
-#             "websocket": websocket,
-#             "session": session,
-#             "agent_speaking": False,
-#             "last_user_text": ""
-#         }
-
-#         try:
-#             first_question = session.ask_question()
-#             await self.speak(call_sid, first_question)
-
-#             async for message in websocket:
-#                 data = json.loads(message)
-
-#                 if data["event"] == "media":
-#                     audio = base64.b64decode(data["media"]["payload"])
-#                     self.audio_buffers[call_sid].extend(audio)
-
-#                     if len(self.audio_buffers[call_sid]) > 16000 * 2:
-#                         await self.process_audio(call_sid)
-
-#                 elif data["event"] == "stop":
-#                     break
-
-#                 # ========== INTERRUPTION ==========
-#                 conn = self.active_connections.get(call_sid)
-#                 if not conn:
-#                     continue
-
-#                 interim = conn.get("last_user_text", "")
-
-#                 if conn["agent_speaking"] and interim and is_interruption(interim):
-#                     print("🛑 INTERRUPTION — stopping agent audio")
-
-#                     self.playback_tokens[call_sid] = None
-#                     conn["agent_speaking"] = False
-
-#                     await conn["websocket"].send(json.dumps({
-#                         "event": "clear",
-#                         "streamSid": call_sid
-#                     }))
-
-#                     await asyncio.sleep(0.05)
-#                     await self.speak(call_sid, random.choice(INTERRUPTION_ACKS), priority=True)
-
-#         finally:
-#             self.active_connections.pop(call_sid, None)
-#             self.audio_buffers.pop(call_sid, None)
-#             print(f"🧹 Cleaned up call: {call_sid}")
-
-#     # ==================== AUDIO PROCESS ====================
-
-#     async def process_audio(self, call_sid):
-#         conn = self.active_connections.get(call_sid)
-#         if not conn:
-#             return
-
-#         audio = bytes(self.audio_buffers[call_sid])
-#         self.audio_buffers[call_sid] = bytearray()
-
-#         segments, _ = self.whisper.transcribe(
-#             np.frombuffer(audio, dtype=np.uint8),
-#             beam_size=5,
-#             language="en",
-#             vad_filter=True
-#         )
-
-#         text = " ".join(s.text for s in segments).strip()
-#         if text:
-#             conn["last_user_text"] = text
-#             await self.process_user_input(call_sid, text)
-
-#     # ==================== USER INPUT ====================
-
-#     async def process_user_input(self, call_sid, text):
-#         conn = self.active_connections.get(call_sid)
-#         if not conn:
-#             return
-
-#         session = conn["session"]
-
-#         if is_question(text):
-#             answer = session.answer_user_question(text)
-#             await self.speak(call_sid, answer)
-#             return
-
-#         reply, advance = session.handle_response(text)
-#         await self.speak(call_sid, reply)
-
-#         if advance:
-#             session.advance_step()
-#             if session.get_current_step() is None:
-#                 await conn["websocket"].close()
-
-#     # ==================== SPEAK (XTTS + BARGE-IN SAFE) ====================
-
-#     async def speak(self, call_sid, text, priority=False):
-#         conn = self.active_connections.get(call_sid)
-#         if not conn:
-#             return
-
-#         token = str(uuid.uuid4())
-#         self.playback_tokens[call_sid] = token
-#         conn["agent_speaking"] = True
-
-#         text = trim_for_tts(text)
-
-#         try:
-#             wav = synthesize_xtts_remote(text)
-#             audio = (wav * 32767).astype(np.int16).tobytes()
-
-#             CHUNK = 320  # ~20ms
-#             for i in range(0, len(audio), CHUNK):
-#                 if self.playback_tokens.get(call_sid) != token:
-#                     return
-
-#                 payload = base64.b64encode(audio[i:i + CHUNK]).decode()
-#                 await conn["websocket"].send(json.dumps({
-#                     "event": "media",
-#                     "streamSid": call_sid,
-#                     "media": {"payload": payload}
-#                 }))
-#                 await asyncio.sleep(0.02)
-
-#         finally:
-#             conn["agent_speaking"] = False
-
-
-# # ==================== SINGLETON ====================
-
-# _voice_handler = None
-
-# def get_voice_handler():
-#     global _voice_handler
-#     if not _voice_handler:
-#         _voice_handler = GPUVoiceHandler()
-#     return _voice_handler

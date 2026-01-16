@@ -1,48 +1,133 @@
-# Core Python Framework
-numpy==1.26.4
-scipy==1.11.4
+# # Core Python Framework
+# numpy==1.26.4
+# scipy==1.11.4
 
-# Web Frameworks
-flask==3.0.0
-quart==0.19.4
-hypercorn==0.16.0
-werkzeug==3.0.1
+# # Web Frameworks
+# flask
+# quart==0.19.4
+# hypercorn==0.16.0
+# werkzeug==3.0.1
 
-# Twilio
-twilio==8.11.0
+# # Twilio
+# twilio==8.11.0
 
-# AI/ML Models
-openai==1.7.0
-sentence-transformers==2.3.1
-transformers==4.36.0
+# # AI/ML Models
+# openai==1.7.0
+# sentence-transformers==2.3.1
+# transformers==4.36.0
 
-# Vector Database
-faiss-cpu==1.7.4  # Use faiss-gpu if you have CUDA
+# # Vector Database
+# faiss-cpu==1.7.4  # Use faiss-gpu if you have CUDA
 
-# Speech Recognition
-faster-whisper==0.10.0
+# # Speech Recognition
+# faster-whisper==0.10.0
 
-# Text-to-Speech
-TTS==0.22.0
-pydub==0.25.1
+# # Text-to-Speech
+# TTS==0.22.0
+# pydub==0.25.1
 
-# Audio Processing
-soundfile==0.12.1
-librosa==0.10.1
-audioop-lts==0.2.1
+# # Audio Processing
+# soundfile==0.12.1
+# librosa==0.10.1
+# audioop-lts==0.2.1
 
-# Utilities
-python-dotenv==1.0.0
-websockets==12.0
-fuzzywuzzy==0.18.0
-python-Levenshtein==0.23.0
-requests==2.31.0
+# # Utilities
+# python-dotenv==1.0.0
+# websockets==12.0
+# fuzzywuzzy==0.18.0
+# python-Levenshtein==0.23.0
+# requests==2.31.0
 
-# Deep Learning
-torch==2.1.0  # Adjust based on your CUDA version
-torchaudio==2.1.0
+# # Deep Learning
+# torch==2.1.0  # Adjust based on your CUDA version
+# torchaudio==2.1.0
 
-# Additional dependencies
-httpx==0.25.2
-anyio==4.1.0
-h11==0.14.0
+# # Additional dependencies
+# httpx==0.25.2
+# anyio==4.1.0
+# h11==0.14.0
+
+
+# ==================== Core Python Framework ====================
+numpy
+scipy
+
+# ==================== Web Frameworks ====================
+flask
+quart
+hypercorn
+werkzeug
+
+# ==================== Twilio ====================
+twilio
+
+# ==================== AI/ML Models ====================
+openai
+sentence-transformers
+transformers
+
+# ==================== Vector Database ====================
+# Use faiss-cpu for CPU-only machines
+faiss-cpu
+
+# For GPU machines, uncomment this instead:
+# faiss-gpu==1.7.4
+
+# ==================== Speech Recognition (STT) ====================
+faster-whisper
+
+# ==================== Text-to-Speech (TTS) ====================
+# For XTTS server only
+TTS
+pydub
+
+# ==================== Audio Processing ====================
+soundfile
+librosa
+
+
+# ==================== Utilities ====================
+python-dotenv
+websockets
+fuzzywuzzy
+python-Levenshtein
+requests
+
+# ==================== Deep Learning ====================
+# Adjust based on your CUDA version
+# For CUDA 11.8:
+torch
+torchaudio
+
+# For CUDA 12.1:
+# torch==2.1.0+cu121
+# torchaudio==2.1.0+cu121
+
+# For CPU only:
+# torch==2.1.0+cpu
+# torchaudio==2.1.0+cpu
+
+# For Mac with Metal:
+# torch==2.1.0
+# torchaudio==2.1.0
+
+# ==================== Additional Dependencies ====================
+httpx
+anyio
+
+# ==================== Data Processing ====================
+# For CSV handling if needed
+pandas
+
+# ==================== Optional: Monitoring & Logging ====================
+# Uncomment if you want structured logging
+# python-json-logger==2.0.7
+
+# Uncomment for performance monitoring
+# prometheus-client==0.19.0
+
+# ==================== Development Dependencies ====================
+# Uncomment for development
+# pytest==7.4.3
+# black==23.12.0
+# flake8==6.1.0
