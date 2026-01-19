@@ -1,21 +1,20 @@
 """
-Integrated Medicaid Voice Agent Server
-Connects to external XTTS server via HTTP
-All components communicate through network requests
+Unified Medicaid Voice Agent Server
+Single Flask-SocketIO server - no separate WebSocket server needed
 """
 
 from flask import Flask, request, Response, jsonify
+from flask_socketio import SocketIO, emit
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
 import os
 from dotenv import load_dotenv
 from medicaid_voice_agent import CallSession
 import json
+import base64
 import asyncio
-from quart import Quart, websocket
-from hypercorn.config import Config
-from hypercorn.asyncio import serve
-import threading
+from threading import Thread
+import time
 
 load_dotenv()
 
@@ -24,22 +23,47 @@ load_dotenv()
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
-PUBLIC_URL = os.getenv('PUBLIC_URL')  # Your ngrok URL for webhooks
+PUBLIC_URL = os.getenv('PUBLIC_URL')  # Your ngrok URL
 
 # XTTS Server Configuration
 XTTS_SERVER_URL = os.getenv('XTTS_SERVER_URL', 'http://localhost:8000')
 
-HTTP_PORT = 5000  # Flask HTTP server
-WS_PORT = 5001    # WebSocket server
+PORT = int(os.getenv('FLASK_PORT', 5000))
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # Store active sessions
 active_sessions = {}
 
-# ==================== FLASK HTTP SERVER ====================
+# ==================== FLASK + SOCKETIO SETUP ====================
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'medicaid-voice-agent-secret'
+
+# Initialize SocketIO with proper CORS settings
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=True,
+    engineio_logger=True
+)
+
+# Import voice handler (will be initialized on first use)
+voice_handler = None
+
+def get_voice_handler():
+    """Lazy initialization of voice handler"""
+    global voice_handler
+    if voice_handler is None:
+        from gpu_voice_handler import GPUVoiceHandler
+        print("🔧 Initializing GPU Voice Handler...")
+        voice_handler = GPUVoiceHandler(xtts_server_url=XTTS_SERVER_URL)
+        print("✅ Voice Handler ready")
+    return voice_handler
+
+
+# ==================== HTTP ENDPOINTS ====================
 
 @app.route('/make-call', methods=['POST'])
 def make_call():
@@ -93,13 +117,20 @@ def voice():
         language='en-US'
     )
     
-    # Connect to WebSocket stream
+    # Connect to WebSocket stream - SAME SERVER, SAME PORT
     connect = Connect()
+    
+    # Use WSS (secure WebSocket) if PUBLIC_URL uses HTTPS
+    ws_protocol = 'wss' if 'https' in PUBLIC_URL else 'ws'
+    ws_url = PUBLIC_URL.replace('https://', '').replace('http://', '')
+    
     connect.stream(
-        url=f'wss://{PUBLIC_URL.replace("https://", "").replace("http://", "")}:{WS_PORT}/stream',
+        url=f'{ws_protocol}://{ws_url}/stream',
         track='inbound_track'
     )
     response.append(connect)
+    
+    print(f"📡 WebSocket URL: {ws_protocol}://{ws_url}/stream")
     
     return Response(str(response), mimetype='text/xml')
 
@@ -144,7 +175,6 @@ def save_session(call_sid, session):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
-    # Check XTTS server connectivity
     import requests
     try:
         xtts_response = requests.get(f'{XTTS_SERVER_URL}/health', timeout=2)
@@ -158,8 +188,7 @@ def health():
         'status': 'healthy',
         'active_calls': len(active_sessions),
         'sessions': list(active_sessions.keys()),
-        'http_port': HTTP_PORT,
-        'ws_port': WS_PORT,
+        'port': PORT,
         'xtts_server': {
             'url': XTTS_SERVER_URL,
             'healthy': xtts_healthy,
@@ -177,122 +206,93 @@ def index():
     """Root endpoint"""
     return {
         'service': 'Medicaid Voice Agent',
-        'version': '2.0',
+        'version': '3.0',
         'status': 'running',
         'endpoints': {
             'make_call': f'{PUBLIC_URL}/make-call',
             'health': f'{PUBLIC_URL}/health',
-            'websocket': f'wss://{PUBLIC_URL.replace("https://", "")}:{WS_PORT}/stream'
+            'websocket': f'{PUBLIC_URL}/stream'
         },
         'xtts_server': XTTS_SERVER_URL
     }
 
 
-# ==================== QUART WEBSOCKET SERVER ====================
+# ==================== WEBSOCKET HANDLERS ====================
 
-quart_app = Quart(__name__)
-
-# Import voice handler (will be initialized on first use)
-voice_handler = None
-
-def get_voice_handler():
-    """Lazy initialization of voice handler"""
-    global voice_handler
-    if voice_handler is None:
-        from gpu_voice_handler import GPUVoiceHandler
-        print("🔧 Initializing GPU Voice Handler...")
-        voice_handler = GPUVoiceHandler(xtts_server_url=XTTS_SERVER_URL)
-        print("✅ Voice Handler ready")
-    return voice_handler
+@socketio.on('connect', namespace='/stream')
+def handle_connect():
+    """WebSocket connection established"""
+    print(f"🔌 WebSocket connected: {request.sid}")
 
 
-@quart_app.websocket('/stream')
-async def stream():
-    """WebSocket endpoint for Twilio Media Streams"""
-    print("🔌 WebSocket connection established")
-    
-    call_sid = None
-    session = None
-    handler = get_voice_handler()
-    
+@socketio.on('disconnect', namespace='/stream')
+def handle_disconnect():
+    """WebSocket disconnected"""
+    print(f"🔌 WebSocket disconnected: {request.sid}")
+
+
+@socketio.on('message', namespace='/stream')
+def handle_message(message):
+    """Handle Twilio Media Stream messages"""
     try:
-        async for message in websocket.receive():
-            data = json.loads(message)
+        data = json.loads(message) if isinstance(message, str) else message
+        
+        event = data.get('event')
+        
+        if event == 'start':
+            # Call started
+            call_sid = data['start']['callSid']
+            print(f"🎬 Stream started for call: {call_sid}")
             
-            event = data.get('event')
+            # Get or create session
+            if call_sid in active_sessions:
+                session = active_sessions[call_sid]
+            else:
+                session = CallSession(call_id=call_sid)
+                active_sessions[call_sid] = session
             
-            if event == 'start':
-                # Call started
-                call_sid = data['start']['callSid']
-                print(f"🎬 Stream started for call: {call_sid}")
-                
-                # Get or create session
-                if call_sid in active_sessions:
-                    session = active_sessions[call_sid]
-                else:
-                    session = CallSession(call_id=call_sid)
-                    active_sessions[call_sid] = session
-                
-                # Start handling the call
-                asyncio.create_task(
-                    handler.handle_call(websocket._get_current_object(), call_sid, session)
+            # Start handling the call in a separate thread
+            handler = get_voice_handler()
+            
+            def run_handler():
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(
+                    handler.handle_call_socketio(request.sid, call_sid, session, socketio)
                 )
             
-            elif event == 'media':
-                # Audio data from user
-                # Handled by voice handler
-                pass
-            
-            elif event == 'stop':
-                # Call ended
-                print(f"🛑 Stream stopped for call: {call_sid}")
-                if call_sid and call_sid in active_sessions:
-                    save_session(call_sid, active_sessions[call_sid])
-                break
+            thread = Thread(target=run_handler, daemon=True)
+            thread.start()
+        
+        elif event == 'media':
+            # Audio data - will be processed by handler
+            pass
+        
+        elif event == 'stop':
+            # Call ended
+            call_sid = data.get('callSid', 'unknown')
+            print(f"🛑 Stream stopped for call: {call_sid}")
+            if call_sid in active_sessions:
+                save_session(call_sid, active_sessions[call_sid])
     
     except Exception as e:
         print(f"❌ WebSocket error: {e}")
-    
-    finally:
-        print(f"🔌 WebSocket connection closed: {call_sid}")
-
-
-@quart_app.route('/ws-health')
-async def ws_health():
-    """WebSocket server health check"""
-    return {
-        'status': 'healthy',
-        'service': 'websocket',
-        'port': WS_PORT
-    }
+        import traceback
+        traceback.print_exc()
 
 
 # ==================== SERVER STARTUP ====================
 
-def run_flask():
-    """Run Flask HTTP server"""
-    print(f"\n🌐 Starting Flask HTTP server on port {HTTP_PORT}...")
-    app.run(host='0.0.0.0', port=HTTP_PORT, debug=False, use_reloader=False)
-
-
-async def run_quart():
-    """Run Quart WebSocket server"""
-    print(f"\n🔌 Starting WebSocket server on port {WS_PORT}...")
-    config = Config()
-    config.bind = [f"0.0.0.0:{WS_PORT}"]
-    await serve(quart_app, config)
-
-
 def main():
-    """Start all servers"""
+    """Start the server"""
     
     print("\n" + "="*60)
-    print("🚀 Medicaid Voice Agent - Integrated Server")
+    print("🚀 Medicaid Voice Agent - Unified Server")
     print("="*60)
     print(f"📞 Twilio Number: {TWILIO_PHONE_NUMBER}")
     print(f"🌐 Public URL: {PUBLIC_URL}")
-    print(f"🖥️  HTTP Server: http://localhost:{HTTP_PORT}")
-    print(f"🔌 WebSocket Server: ws://localhost:{WS_PORT}")
+    print(f"🖥️  Server Port: {PORT}")
     print(f"🎤 XTTS Server: {XTTS_SERVER_URL}")
     print("="*60)
     
@@ -318,19 +318,25 @@ def main():
     except Exception as e:
         print(f"❌ Cannot connect to XTTS server: {e}")
         print(f"   Make sure XTTS server is running at {XTTS_SERVER_URL}")
-        print(f"   Start it with: python xtts_server.py")
+        print(f"   Start it with: python server.py")
     
     print("\n✅ All components initialized")
     print("\n" + "="*60)
     print("🎯 Ready to receive calls!")
     print("="*60 + "\n")
+    print("💡 Make sure to expose this server with ngrok:")
+    print(f"   ngrok http {PORT}")
+    print(f"\n   Then update PUBLIC_URL in .env to your ngrok URL")
+    print("")
     
-    # Start Flask in separate thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Run WebSocket server in main thread
-    asyncio.run(run_quart())
+    # Start the server
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=PORT,
+        debug=False,
+        allow_unsafe_werkzeug=True
+    )
 
 
 if __name__ == '__main__':

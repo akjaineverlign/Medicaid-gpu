@@ -14,7 +14,6 @@ import random
 
 load_dotenv()
 
-# ==================== GPU RAG IMPORT ====================
 from gpu_rag_system import GPURAGSystem, answer_with_rag_and_context
 
 # Initialize GPU RAG system (singleton)
@@ -22,7 +21,6 @@ print("🔧 Initializing GPU RAG System...")
 gpu_rag = GPURAGSystem()
 print("✅ GPU RAG System initialized")
 
-# ==================== LLM CONFIG ====================
 client = OpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY"),
@@ -41,7 +39,6 @@ def llm(prompt, json_mode=False):
     res = client.chat.completions.create(**payload)
     return res.choices[0].message.content.strip()
 
-# ==================== DATABASE SIMULATION ====================
 MEMBER_DB = {
     "12345": {
         "name": "John Doe",
@@ -52,7 +49,6 @@ MEMBER_DB = {
     }
 }
 
-# ==================== ADDRESS MATCHING ====================
 def fuzzy_match_address(user_address, db_address, threshold=70):
     """Match address with fuzzy logic"""
     user_clean = user_address.lower().strip()
@@ -269,7 +265,6 @@ class CallSession:
         # Add user input to conversation history
         self.add_to_conversation("user", user_input)
         
-        # ========== CHECK IF USER IS ASKING A QUESTION ==========
         # This is handled by voice handler now, but keeping for compatibility
         
         # Handle specific steps
@@ -317,83 +312,79 @@ class CallSession:
             return "I didn't quite catch the date. Could you say your date of birth? For example, 'January 15, 1985'.", False
     
     def _handle_address(self, user_input, member):
-        """Address verification with fuzzy matching"""
-        
-        user_address = extract_address(user_input)
-        self.address_attempts += 1
-        
-        self.user_provided_address = user_address
-        self.form["user_provided_address"] = user_address
-        
-        db_address = member['address']
-        is_match, similarity, missing_parts, db_parts = fuzzy_match_address(user_address, db_address)
-        
-        print(f"[ADDRESS] Similarity: {similarity}, Match: {is_match}, Missing: {missing_parts}")
-        
-        # Exact or very close match
-        if similarity >= 90:
-            self.form["address_confirmed"] = "confirmed"
-            return "Great, that matches perfectly.", True
-        
-        # Good partial match
-        elif is_match and missing_parts:
-            correction = f"Okay, so I have that as {db_address}. "
-            
-            if len(missing_parts) == 1:
-                correction += f"I just need you to confirm the complete address including the {missing_parts[0]}. Is that correct?"
-            else:
-                correction += "Can you confirm that's your current address?"
-            
-            self.form["address_corrections_made"].append({
-                "user_provided": user_address,
-                "corrected_to": db_address,
-                "similarity": similarity
-            })
-            
-            self.awaiting_data = "confirm_corrected_address"
-            return correction, False
-        
-        # Partial match
-        elif similarity >= 50:
-            self.form["address_corrections_made"].append({
-                "user_provided": user_address,
-                "db_address": db_address,
-                "similarity": similarity
-            })
-            
-            return f"I have your address on file as {db_address}. Is that still correct?", False
-        
-        # No match
-        else:
-            if self.address_attempts >= 2:
-                self.form["address_confirmed"] = "changed"
-                self.form["new_address"] = user_address
-                return "Got it, I've updated your address in the system.", True
-            else:
-                return f"That doesn't match our records. We have {db_address}. Has your address changed?", False
-        
+        """Address verification with proper multi-turn handling"""
+
+        db_address = member["address"]
+
+
         if self.awaiting_data == "confirm_corrected_address":
             if is_affirmative(user_input):
                 self.form["address_confirmed"] = "confirmed"
                 self.awaiting_data = None
                 return "Perfect, I've confirmed your address.", True
-            elif is_negative(user_input):
+
+            if is_negative(user_input):
                 self.awaiting_data = "new_address"
-                return "No problem. What's your current address including street, city, state, and zip?", False
-            else:
-                return "Just need a yes or no - is that address correct?", False
-        
+                return (
+                    "No problem. What's your full current address including street, city, state, and zip?",
+                    False
+                )
+
+            return "Just to confirm, is that address correct? Please say yes or no.", False
+
         if self.awaiting_data == "new_address":
             new_address = extract_address(user_input)
+
             if len(new_address) > 15:
                 self.form["address_confirmed"] = "changed"
                 self.form["new_address"] = new_address
                 self.awaiting_data = None
-                return "Great, I've updated your address.", True
-            else:
-                return "Could you give me the complete street address, city, state, and zip code?", False
-        
-        return "Sorry, I didn't catch that. Could you repeat your address?", False
+                return "Got it, I've updated your address.", True
+
+            return "Could you please give the full address with street, city, state, and zip?", False
+
+
+        user_address = extract_address(user_input)
+        self.address_attempts += 1
+
+        self.user_provided_address = user_address
+        self.form["user_provided_address"] = user_address
+
+        is_match, similarity, missing_parts, _ = fuzzy_match_address(
+            user_address, db_address
+        )
+
+        print(f"[ADDRESS] similarity={similarity}, missing={missing_parts}")
+
+        if similarity >= 90:
+            self.form["address_confirmed"] = "confirmed"
+            return "Great, that matches perfectly.", True
+
+        if similarity >= 70 and missing_parts:
+            self.awaiting_data = "confirm_corrected_address"
+
+            self.form["address_corrections_made"].append({
+                "user_provided": user_address,
+                "corrected_to": db_address,
+                "similarity": similarity
+            })
+
+            return f"I have your address as {db_address}. Is that correct?", False
+
+        if similarity >= 50:
+            return f"I have your address on file as {db_address}. Is that still correct?", False
+
+
+        if self.address_attempts >= 2:
+            self.form["address_confirmed"] = "changed"
+            self.form["new_address"] = user_address
+            return "Thanks, I've updated your address in the system.", True
+
+        return (
+            f"That doesn't match our records. We have {db_address}. Has your address changed?",
+            False
+        )
+
     
     def _handle_household(self, user_input):
         if self.awaiting_data == "household_details":
